@@ -1,0 +1,7 @@
+fastapi
+uvicorn  # For running the FastAPI app
+pydantic
+langchain-openai
+langchain-community
+openai
+python-dotenv  # Recommended for local environment variables

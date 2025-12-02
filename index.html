@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Saudi Legal RAG Demo</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    textarea, input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px;
+      margin-top: 10px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      font-family: inherit;
+    }
+    button {
+      margin-top: 10px;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .answer {
+      margin-top: 20px;
+      white-space: pre-wrap;
+      background: #fafafa;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #eee;
+    }
+    .articles {
+      margin-top: 15px;
+      font-size: 0.9rem;
+      background: #fdfdfd;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px dashed #ddd;
+    }
+    .articles li {
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Saudi Legal RAG Interface</h2>
+    <p>اكتب سؤالك القانوني وسيتم الإجابة بالاستناد إلى الأنظمة السعودية المخزنة في قاعدة البيانات.</p>
+
+    <textarea id="question" rows="4" placeholder="مثال: ما هي الحالات التي يجوز فيها الحكم بعدم الاختصاص في الدعوى التجارية؟"></textarea>
+    <button id="askBtn">إرسال السؤال</button>
+
+    <div id="status"></div>
+
+    <div id="result" style="display:none;">
+      <h3>الإجابة:</h3>
+      <div id="answer" class="answer"></div>
+
+      <h3>المواد النظامية المستخدمة:</h3>
+      <ul id="articles" class="articles"></ul>
+    </div>
+  </div>
+
+  <script>
+    const askBtn = document.getElementById("askBtn");
+    const questionInput = document.getElementById("question");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+    const answerEl = document.getElementById("answer");
+    const articlesEl = document.getElementById("articles");
+
+    askBtn.onclick = async () => {
+      const question = questionInput.value.trim();
+      if (!question) {
+        alert("من فضلك اكتب سؤالاً قانونياً.");
+        return;
+      }
+
+      statusEl.textContent = "🔍 جاري المعالجة...";
+      resultEl.style.display = "none";
+      answerEl.textContent = "";
+      articlesEl.innerHTML = "";
+
+      try {
+        const response = await fetch("http://localhost:8000/ask", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ question })
+        });
+
+        if (!response.ok) {
+          throw new Error("API error");
+        }
+
+        const data = await response.json();
+        statusEl.textContent = "";
+        resultEl.style.display = "block";
+
+        answerEl.textContent = data.answer || "لا توجد إجابة.";
+
+        if (data.articles && data.articles.length > 0) {
+          data.articles.forEach(a => {
+            const li = document.createElement("li");
+            li.textContent = `${a.ref} ${a.system} – ${a.article_number}`;
+            articlesEl.appendChild(li);
+          });
+        } else {
+          articlesEl.innerHTML = "<li>لم تُستخدم مواد نظامية في هذه الإجابة.</li>";
+        }
+
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "❌ حدث خطأ أثناء الاتصال بالخادم.";
+      }
+    };
+  </script>
+</body>
+</html>
