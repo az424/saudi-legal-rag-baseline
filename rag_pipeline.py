@@ -123,7 +123,7 @@ def build_teacher_prompt(question: str, articles, refs_list):
 
 def call_gpt_teacher(prompt: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4.1",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         max_tokens=2000,
