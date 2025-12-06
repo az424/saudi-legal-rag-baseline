@@ -1,7 +1,6 @@
 fastapi
 uvicorn  # For running the FastAPI app
 pydantic
-langchain-huggingface
 langchain-openai
 langchain-community
 sentence-transformers
