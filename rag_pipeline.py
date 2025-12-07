@@ -3,7 +3,6 @@
 import os
 import json
 import time
-import re
 import requests
 
 from dotenv import load_dotenv
@@ -69,54 +68,107 @@ def load_arabic_embeddings():
     )
 
 
-embeddings = load_arabic_embeddings()
-
-
 # ==========================
 # 3) تحميل البيانات القانونية
 # ==========================
 
-with open("full_systems_dataset_fixed.json", "r", encoding="utf-8") as f:
-    raw_data = json.load(f)
+def load_legal_documents():
+    """
+    تحميل ملف الأنظمة (JSON) وبناؤه كمستندات LangChain.
+    يمكنك تغيير المسار عن طريق المتغير:
+    SYSTEMS_DATASET_PATH
+    """
+    dataset_path = os.getenv("SYSTEMS_DATASET_PATH", "full_systems_dataset_fixed.json")
 
-# في بعض الحالات يكون البيانات على شكل قائمة قوائم
-if isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], list):
-    data = [item for sub in raw_data for item in sub]
-else:
-    data = raw_data
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Legal systems dataset not found at: {dataset_path}")
 
-documents = []
-for item in data:
-    if not isinstance(item, dict):
-        continue
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
 
-    system = item.get("system", "")
-    article_number = normalize_numbers(str(item.get("article_number", "")))
-    text = item.get("text", "")
+    # في بعض الحالات يكون البيانات على شكل قائمة قوائم
+    if isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], list):
+        data = [item for sub in raw_data for item in sub]
+    else:
+        data = raw_data
 
-    page_content = f"{system} - المادة {article_number}: {text}"
-    metadata = {
-        "system": system,
-        "article_number": article_number,
-        "original_text": text,
-    }
-    documents.append(Document(page_content=page_content, metadata=metadata))
+    documents = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
 
-debug_print(f"Loaded {len(documents)} documents into RAG.")
+        system = item.get("system", "")
+        article_number = normalize_numbers(str(item.get("article_number", "")))
+        text = item.get("text", "")
+
+        page_content = f"{system} - المادة {article_number}: {text}"
+        metadata = {
+            "system": system,
+            "article_number": article_number,
+            "original_text": text,
+        }
+        documents.append(Document(page_content=page_content, metadata=metadata))
+
+    debug_print(f"Loaded {len(documents)} documents into RAG.")
+    return documents
 
 
 # ==========================
-# 4) بناء FAISS + BM25
+# 4) حالة RAG (نبنيها أول مرة فقط)
 # ==========================
 
-# FAISS (dense retriever)
-vector_store = FAISS.from_documents(documents, embeddings)
-faiss_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+class RagState:
+    """
+    هذه الكلاس مسؤولة عن:
+    - تحميل الـ embeddings
+    - تحميل المستندات
+    - بناء FAISS + BM25
+    """
 
-# BM25 (sparse retriever)
-bm25_retriever = BM25Retriever.from_documents(documents)
-bm25_retriever.k = 10  # نأخذ 10 مبدئيًا من كل واحد
+    def __init__(self):
+        t0 = time.time()
+        debug_print("Initializing RAGState (embeddings + documents + indexes)...")
 
+        # 1) Embeddings
+        debug_print("Loading embeddings...")
+        self.embeddings = load_arabic_embeddings()
+
+        # 2) Legal documents
+        debug_print("Loading legal documents...")
+        self.documents = load_legal_documents()
+
+        # 3) FAISS
+        debug_print("Building FAISS index...")
+        vector_store = FAISS.from_documents(self.documents, self.embeddings)
+        self.faiss_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+
+        # 4) BM25
+        debug_print("Building BM25 retriever...")
+        self.bm25_retriever = BM25Retriever.from_documents(self.documents)
+        self.bm25_retriever.k = 10
+
+        debug_print(f"RAG pipeline initialized in {time.time() - t0:.2f} seconds.")
+
+
+# سنخزن الحالة هنا (كسنجلتون بسيط)
+_rag_state: RagState | None = None
+
+
+def get_rag_state() -> RagState:
+    """
+    نستدعيها من answer_question.
+    إذا كانت None → ننشئ RAGState لأول مرة.
+    """
+    global _rag_state
+    if _rag_state is None:
+        debug_print("First call detected, creating RagState...")
+        _rag_state = RagState()
+    return _rag_state
+
+
+# ==========================
+# 5) الاسترجاع الهجين FAISS + BM25
+# ==========================
 
 def hybrid_retrieve(query: str, k: int = 5):
     """
@@ -128,8 +180,10 @@ def hybrid_retrieve(query: str, k: int = 5):
     t0 = time.time()
     query_norm = normalize_numbers(query)
 
-    docs_bm25 = bm25_retriever.get_relevant_documents(query_norm)
-    docs_faiss = faiss_retriever.get_relevant_documents(query_norm)
+    state = get_rag_state()
+
+    docs_bm25 = state.bm25_retriever.get_relevant_documents(query_norm)
+    docs_faiss = state.faiss_retriever.get_relevant_documents(query_norm)
 
     combined = {}
 
@@ -159,7 +213,7 @@ def hybrid_retrieve(query: str, k: int = 5):
 
 
 # ==========================
-# 5) تحويل المستندات إلى مواد + مراجع
+# 6) تحويل المستندات إلى مواد + مراجع
 # ==========================
 
 def docs_to_articles_with_refs(docs):
@@ -188,7 +242,7 @@ def docs_to_articles_with_refs(docs):
 
 
 # ==========================
-# 6) بناء الـ Prompt القانوني
+# 7) بناء الـ Prompt القانوني
 # ==========================
 
 def build_teacher_prompt(question: str, articles, refs_list):
@@ -224,7 +278,7 @@ def build_teacher_prompt(question: str, articles, refs_list):
 
 
 # ==========================
-# 7) دوال استدعاء الـ LLMs
+# 8) دوال استدعاء الـ LLMs
 # ==========================
 
 def call_openai_teacher(prompt: str) -> str:
@@ -309,7 +363,7 @@ def call_teacher_llm(prompt: str) -> str:
 
 
 # ==========================
-# 8) الدالة التي يستدعيها API.py
+# 9) الدالة التي يستدعيها API.py
 # ==========================
 
 def answer_question(question: str):
