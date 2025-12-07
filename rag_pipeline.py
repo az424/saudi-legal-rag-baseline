@@ -57,15 +57,12 @@ def debug_print(msg: str):
 # ==========================
 
 def load_arabic_embeddings():
-    """
-    نستخدم نموذج multilingual-e5-large
-    وهو قوي جدًا في البحث الدلالي متعدد اللغات (ومنها العربية).
-    """
     return HuggingFaceEmbeddings(
-        model_name="intfloat/multilingual-e5-large",
+        model_name="intfloat/multilingual-e5-small",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True},
     )
+
 
 
 # ==========================
