@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings  # جديد 👈
+
 
 from openai import OpenAI
 
@@ -57,11 +58,18 @@ def debug_print(msg: str):
 # ==========================
 
 def load_arabic_embeddings():
-    return HuggingFaceEmbeddings(
-        model_name="intfloat/multilingual-e5-small",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
+    """
+    نستخدم OpenAI Embeddings (text-embedding-3-small)
+    عشان نتفادى تحميل نموذج HuggingFace ثقيل داخل Render.
+    """
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    return OpenAIEmbeddings(
+        model="text-embedding-3-small"
+        # ممكن تضيف dimensions إذا حاب، الافتراضي ممتاز:
+        # dimensions=1536
     )
+
 
 
 
