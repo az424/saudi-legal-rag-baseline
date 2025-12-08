@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>Saudi Legal RAG Demo</title>
+
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -18,14 +19,12 @@
       border-radius: 12px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
     }
-    textarea, input {
+    textarea {
       width: 100%;
-      box-sizing: border-box;
       padding: 10px;
-      margin-top: 10px;
       border-radius: 8px;
       border: 1px solid #ccc;
-      font-family: inherit;
+      margin-top: 10px;
     }
     button {
       margin-top: 10px;
@@ -34,6 +33,8 @@
       border: none;
       cursor: pointer;
       font-weight: 600;
+      background: #007bff;
+      color: white;
     }
     .answer {
       margin-top: 20px;
@@ -45,23 +46,57 @@
     }
     .articles {
       margin-top: 15px;
-      font-size: 0.9rem;
       background: #fdfdfd;
       padding: 10px;
       border-radius: 8px;
       border: 1px dashed #ddd;
     }
-    .articles li {
-      margin-bottom: 6px;
+
+    /* ⭐ نظام النجوم */
+    .rating-group {
+      direction: ltr;
+      display: flex;
+      gap: 5px;
+      font-size: 28px;
+      margin: 5px 0 15px 0;
+      cursor: pointer;
+    }
+    .star {
+      color: #ccc;
+      transition: 0.2s;
+    }
+    .star.selected,
+    .star:hover,
+    .star:hover ~ .star {
+      color: gold;
+    }
+
+    .eval-box {
+      margin-top: 20px;
+      padding: 15px;
+      background: #fdfdfd;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+    .success {
+      color: green;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    .fail {
+      color: red;
+      margin-top: 10px;
+      font-weight: bold;
     }
   </style>
 </head>
 <body>
+
   <div class="container">
     <h2>Saudi Legal RAG Interface</h2>
-    <p>اكتب سؤالك القانوني وسيتم الإجابة بالاستناد إلى الأنظمة السعودية المخزنة في قاعدة البيانات.</p>
+    <p>اكتب سؤالك القانوني وسيتم الإجابة بالاستناد إلى الأنظمة السعودية.</p>
 
-    <textarea id="question" rows="4" placeholder="مثال: ما هي الحالات التي يجوز فيها الحكم بعدم الاختصاص في الدعوى التجارية؟"></textarea>
+    <textarea id="question" rows="4"></textarea>
     <button id="askBtn">إرسال السؤال</button>
 
     <div id="status"></div>
@@ -72,59 +107,135 @@
 
       <h3>المواد النظامية المستخدمة:</h3>
       <ul id="articles" class="articles"></ul>
+
+      <!-- ⭐ صندوق التقييم -->
+      <div class="eval-box">
+        <h3>تقييم الإجابة</h3>
+
+        <div>
+          <label>الدقة Accuracy:</label>
+          <div class="rating-group" id="acc-stars"></div>
+        </div>
+
+        <div>
+          <label>الوضوح Clarity:</label>
+          <div class="rating-group" id="clarity-stars"></div>
+        </div>
+
+        <div>
+          <label>العمق القانوني Legal Depth:</label>
+          <div class="rating-group" id="depth-stars"></div>
+        </div>
+
+        <div>
+          <label>التقييم العام Overall Score:</label>
+          <div class="rating-group" id="overall-stars"></div>
+        </div>
+
+        <button id="evalBtn">إرسال التقييم</button>
+        <div id="evalStatus"></div>
+      </div>
     </div>
   </div>
 
   <script>
     const askBtn = document.getElementById("askBtn");
+    const evalBtn = document.getElementById("evalBtn");
     const questionInput = document.getElementById("question");
-    const statusEl = document.getElementById("status");
-    const resultEl = document.getElementById("result");
     const answerEl = document.getElementById("answer");
     const articlesEl = document.getElementById("articles");
+    const resultEl = document.getElementById("result");
+    const statusEl = document.getElementById("status");
+    const evalStatus = document.getElementById("evalStatus");
 
+    // ⭐ وظيفة إنشاء نجوم التقييم
+    function createStars(containerId) {
+      const container = document.getElementById(containerId);
+      for (let i = 1; i <= 5; i++) {
+        const span = document.createElement("span");
+        span.classList.add("star");
+        span.innerHTML = "★";
+        span.dataset.value = i;
+
+        span.onclick = () => {
+          [...container.children].forEach(s => s.classList.remove("selected"));
+          for (let j = 0; j < i; j++) {
+            container.children[j].classList.add("selected");
+          }
+          container.dataset.selected = i;
+        };
+
+        container.appendChild(span);
+      }
+      container.dataset.selected = 0;
+    }
+
+    // ⭐ إنشاء مجموعات النجوم
+    createStars("acc-stars");
+    createStars("clarity-stars");
+    createStars("depth-stars");
+    createStars("overall-stars");
+
+    // =============================
+    // 1) إرسال السؤال للباك-إند
+    // =============================
     askBtn.onclick = async () => {
       const question = questionInput.value.trim();
-      if (!question) {
-        alert("من فضلك اكتب سؤالاً قانونياً.");
-        return;
-      }
+      if (!question) return alert("اكتب سؤالاً.");
 
-      statusEl.textContent = "🔍 جاري المعالجة...";
+      statusEl.textContent = "جاري المعالجة...";
       resultEl.style.display = "none";
-      answerEl.textContent = "";
+      evalStatus.textContent = "";
+
+      const response = await fetch("https://rag-backend-55de.onrender.com/ask", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({question})
+      });
+
+      const data = await response.json();
+
+      statusEl.textContent = "";
+      resultEl.style.display = "block";
+
+      answerEl.textContent = data.answer;
       articlesEl.innerHTML = "";
 
-      try {
-        const response = await fetch("https://rag-backend-55de.onrender.com/ask", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ question })
+      if (data.articles && data.articles.length > 0) {
+        data.articles.forEach(a => {
+          const li = document.createElement("li");
+          li.textContent = `${a.ref} ${a.system} – ${a.article_number}`;
+          articlesEl.appendChild(li);
         });
+      }
+    };
 
-        if (!response.ok) {
-          throw new Error("API error");
-        }
+    // =============================
+    // 2) إرسال التقييم للباك-إند
+    // =============================
+    evalBtn.onclick = async () => {
+      const evaluation = {
+        question: questionInput.value,
+        answer: answerEl.textContent,
+        accuracy: Number(document.getElementById("acc-stars").dataset.selected),
+        clarity: Number(document.getElementById("clarity-stars").dataset.selected),
+        legal_depth: Number(document.getElementById("depth-stars").dataset.selected),
+        relevance: 0,   // لم نعد نستخدمها
+        overall_score: Number(document.getElementById("overall-stars").dataset.selected),
+      };
 
-        const data = await response.json();
-        statusEl.textContent = "";
-        resultEl.style.display = "block";
+      const response = await fetch("https://rag-backend-55de.onrender.com/evaluate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(evaluation)
+      });
 
-        answerEl.textContent = data.answer || "لا توجد إجابة.";
+      const data = await response.json();
 
-        if (data.articles && data.articles.length > 0) {
-          data.articles.forEach(a => {
-            const li = document.createElement("li");
-            li.textContent = `${a.ref} ${a.system} – ${a.article_number}`;
-            articlesEl.appendChild(li);
-          });
-        } else {
-          articlesEl.innerHTML = "<li>لم تُستخدم مواد نظامية في هذه الإجابة.</li>";
-        }
-
-      } catch (err) {
-        console.error(err);
-        statusEl.textContent = "❌ حدث خطأ أثناء الاتصال بالخادم.";
+      if (data.status === "saved") {
+        evalStatus.innerHTML = "<span class='success'>✔️ تم حفظ التقييم بنجاح</span>";
+      } else {
+        evalStatus.innerHTML = "<span class='fail'>❌ تعذر حفظ التقييم</span>";
       }
     };
   </script>
