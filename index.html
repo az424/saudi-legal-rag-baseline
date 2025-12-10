@@ -52,23 +52,31 @@
       border: 1px dashed #ddd;
     }
 
-    /* ⭐ نظام النجوم */
+    /* ⭐ Improved Star Rating Styling */
+    .rating-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
     .rating-group {
       direction: ltr;
       display: flex;
       gap: 5px;
-      font-size: 28px;
-      margin: 5px 0 15px 0;
       cursor: pointer;
+      font-size: 34px;
     }
     .star {
       color: #ccc;
       transition: 0.2s;
     }
-    .star.selected,
-    .star:hover,
-    .star:hover ~ .star {
+    .star.selected {
       color: gold;
+    }
+    .rating-value {
+      font-size: 18px;
+      color: #007bff;
+      font-weight: bold;
+      min-width: 30px;
     }
 
     .eval-box {
@@ -94,6 +102,12 @@
 
   <div class="container">
     <h2>Saudi Legal RAG Interface</h2>
+
+    <!-- ✔ Added Researcher Info -->
+    <p style="font-size: 18px; font-weight: bold; color:#444;">
+      باحث دكتوراه في نظم المعلومات: <span style="color:#007bff;">عبدالعزيز عبدالله الرويلي</span>
+    </p>
+
     <p>اكتب سؤالك القانوني وسيتم الإجابة بالاستناد إلى الأنظمة السعودية.</p>
 
     <textarea id="question" rows="4"></textarea>
@@ -108,28 +122,40 @@
       <h3>المواد النظامية المستخدمة:</h3>
       <ul id="articles" class="articles"></ul>
 
-      <!-- ⭐ صندوق التقييم -->
+      <!-- ⭐ تقييم الإجابة -->
       <div class="eval-box">
         <h3>تقييم الإجابة</h3>
 
         <div>
           <label>الدقة Accuracy:</label>
-          <div class="rating-group" id="acc-stars"></div>
+          <div class="rating-wrapper">
+            <div class="rating-group" id="acc-stars"></div>
+            <div class="rating-value" id="acc-value">0</div>
+          </div>
         </div>
 
         <div>
           <label>الوضوح Clarity:</label>
-          <div class="rating-group" id="clarity-stars"></div>
+          <div class="rating-wrapper">
+            <div class="rating-group" id="clarity-stars"></div>
+            <div class="rating-value" id="clarity-value">0</div>
+          </div>
         </div>
 
         <div>
           <label>العمق القانوني Legal Depth:</label>
-          <div class="rating-group" id="depth-stars"></div>
+          <div class="rating-wrapper">
+            <div class="rating-group" id="depth-stars"></div>
+            <div class="rating-value" id="depth-value">0</div>
+          </div>
         </div>
 
         <div>
           <label>التقييم العام Overall Score:</label>
-          <div class="rating-group" id="overall-stars"></div>
+          <div class="rating-wrapper">
+            <div class="rating-group" id="overall-stars"></div>
+            <div class="rating-value" id="overall-value">0</div>
+          </div>
         </div>
 
         <button id="evalBtn">إرسال التقييم</button>
@@ -148,9 +174,11 @@
     const statusEl = document.getElementById("status");
     const evalStatus = document.getElementById("evalStatus");
 
-    // ⭐ وظيفة إنشاء نجوم التقييم
-    function createStars(containerId) {
+    // ⭐ Enhanced star function
+    function createStars(containerId, valueId) {
       const container = document.getElementById(containerId);
+      const valueBox = document.getElementById(valueId);
+
       for (let i = 1; i <= 5; i++) {
         const span = document.createElement("span");
         span.classList.add("star");
@@ -158,26 +186,32 @@
         span.dataset.value = i;
 
         span.onclick = () => {
+          const rating = Number(span.dataset.value);
+          container.dataset.selected = rating;
+
           [...container.children].forEach(s => s.classList.remove("selected"));
-          for (let j = 0; j < i; j++) {
+          for (let j = 0; j < rating; j++) {
             container.children[j].classList.add("selected");
           }
-          container.dataset.selected = i;
+
+          valueBox.textContent = rating;
         };
 
         container.appendChild(span);
       }
+
       container.dataset.selected = 0;
+      valueBox.textContent = 0;
     }
 
-    // ⭐ إنشاء مجموعات النجوم
-    createStars("acc-stars");
-    createStars("clarity-stars");
-    createStars("depth-stars");
-    createStars("overall-stars");
+    // ⭐ Initialize rating groups
+    createStars("acc-stars", "acc-value");
+    createStars("clarity-stars", "clarity-value");
+    createStars("depth-stars", "depth-value");
+    createStars("overall-stars", "overall-value");
 
     // =============================
-    // 1) إرسال السؤال للباك-إند
+    // 1) Ask RAG backend
     // =============================
     askBtn.onclick = async () => {
       const question = questionInput.value.trim();
@@ -204,14 +238,14 @@
       if (data.articles && data.articles.length > 0) {
         data.articles.forEach(a => {
           const li = document.createElement("li");
-          li.textContent = `${a.ref} ${a.system} – ${a.article_number}`;
+          li.textContent = `${a.ref} ${a.system} (${a.system_code}) – ${a.article_number} – ${a.article_key}`;
           articlesEl.appendChild(li);
         });
       }
     };
 
     // =============================
-    // 2) إرسال التقييم للباك-إند
+    // 2) Submit evaluation
     // =============================
     evalBtn.onclick = async () => {
       const evaluation = {
@@ -220,7 +254,7 @@
         accuracy: Number(document.getElementById("acc-stars").dataset.selected),
         clarity: Number(document.getElementById("clarity-stars").dataset.selected),
         legal_depth: Number(document.getElementById("depth-stars").dataset.selected),
-        relevance: 0,   // لم نعد نستخدمها
+        relevance: 0,
         overall_score: Number(document.getElementById("overall-stars").dataset.selected),
       };
 
