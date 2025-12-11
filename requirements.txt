@@ -9,3 +9,6 @@ python-dotenv  # Recommended for local environment variablesfaiss-cpu
 rank_bm25
 psycopg2-binary
 sqlalchemy
+sentence-transformers
+scikit-learn
+
