@@ -12,7 +12,7 @@ from classifier import predict_system
 
 load_dotenv()
 
-DATA_PATH = "data/full_systems_dataset_fixed.json"
+DATA_PATH = "full_systems_dataset_fixed.json"
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
 

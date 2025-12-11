@@ -7,7 +7,7 @@ from sklearn.linear_model import LogisticRegression
 
 print("[Classifier] Loading legal data...")
 
-with open("data/full_systems_dataset_fixed.json", "r", encoding="utf-8") as f:
+with open("full_systems_dataset_fixed.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 texts = [x["text"] for x in data]
