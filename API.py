@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 # 1) Load environment variables
 # =====================================
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL")
-
+# إذا لم يجد عنواناً في Render، سيستخدم ملفاً محلياً اسمه test.db
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db") 
 # =====================================
 # 2) Database setup with SQLAlchemy
 # =====================================
