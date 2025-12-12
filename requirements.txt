@@ -1,14 +1,13 @@
 fastapi
-uvicorn  # For running the FastAPI app
-pydantic
-langchain
-langchain-openai
-langchain-community
+uvicorn
+python-dotenv
 openai
-python-dotenv  # Recommended for local environment variablesfaiss-cpu
-rank_bm25
-psycopg2-binary
+langchain
+langchain-community
+langchain-openai
+langchain-core
+faiss-cpu
+rank-bm25
+pydantic
 sqlalchemy
-sentence-transformers
-scikit-learn
-
+cohere
