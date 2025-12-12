@@ -16,7 +16,7 @@ def _init_classifier():
 
     print("[Classifier] Initializing (lazy)...")
 
-    with open("data/full_systems_dataset_fixed.json", "r", encoding="utf-8") as f:
+    with open("full_systems_dataset_fixed.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
     texts = [x["text"] for x in data]
