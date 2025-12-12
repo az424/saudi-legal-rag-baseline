@@ -11,3 +11,4 @@ rank-bm25
 pydantic
 sqlalchemy
 cohere
+tiktoken

@@ -1,6 +1,5 @@
 # rag_pipeline.py
 import os, json, gc
-# يجب التأكد من تثبيت مكتبة cohere: pip install cohere
 import cohere 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -15,189 +14,172 @@ load_dotenv()
 DATA_PATH = "full_systems_dataset_fixed.json"
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
-COHERE_KEY = os.getenv("COHERE_API_KEY") # تأكد من إضافة هذا المتغير في Render
+COHERE_KEY = os.getenv("COHERE_API_KEY") 
+
+client = OpenAI()
+co = None
+if COHERE_KEY:
+    try:
+        co = cohere.Client(COHERE_KEY)
+    except:
+        print("[RAG] Failed to init Cohere client.")
 
 # =====================
 # Global Variables (Lazy Loading)
 # =====================
 _faiss_retriever = None
 _bm25_retriever = None
-client = OpenAI()
-co = None # Cohere client placeholder
 
 def _initialize_retrievers():
-    global _faiss_retriever, _bm25_retriever, co
+    global _faiss_retriever, _bm25_retriever
     if _faiss_retriever is not None:
         return _faiss_retriever, _bm25_retriever
 
-    print("[RAG] Initializing... Loading dataset...")
-    
-    # Initialize Cohere client if key exists
-    if COHERE_KEY:
-        co = cohere.Client(COHERE_KEY)
-        print("[RAG] Cohere Reranker initialized.")
-    else:
-        print("[RAG] WARNING: COHERE_API_KEY not found. Reranking will be skipped.")
-
-    with open(DATA_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    print("[RAG] Loading dataset...")
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print("[RAG] ERROR: Dataset file not found!")
+        return None, None
 
     documents = []
     for item in data:
-        # تحسين المحتوى ليكون غنياً بالمعلومات للمقيم (Reranker)
-        page_content = f"نظام: {item['system']}\nرقم المادة: {item['article_number']}\nنص المادة: {item['text']}"
+        # دمجنا اسم النظام ورقم المادة في النص لضمان التقاطها في البحث
+        full_text = f"النظام: {item['system']}\nالمادة رقم: {item['article_number']}\nالنص: {item['text']}"
         metadata = {
             "system": item["system"],
             "article_number": item["article_number"],
             "original_text": item["text"],
-            "article_key": item["article_key"]
+            "article_key": item.get("article_key", str(item["article_number"]))
         }
-        documents.append(Document(page_content=page_content, metadata=metadata))
+        documents.append(Document(page_content=full_text, metadata=metadata))
     
     del data
     gc.collect()
 
-    # زيادة عدد النتائج الأولية في الفهارس
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
     faiss_store = FAISS.from_documents(documents, embeddings)
-    _faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 30}) # نطلب 30 مبدئياً
+    _faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 30}) # وسعنا النطاق
 
     _bm25_retriever = BM25Retriever.from_documents(documents)
-    _bm25_retriever.k = 30 # نطلب 30 مبدئياً
+    _bm25_retriever.k = 30 
 
     del documents
     gc.collect()
-
-    print("[RAG] Initialization Complete.")
+    
+    print("[RAG] Ready.")
     return _faiss_retriever, _bm25_retriever
 
 # =====================
-# RRF Logic
+# The "Smart" Layer: Query Expansion
+# =====================
+def optimize_query_for_legal_search(user_query: str):
+    """
+    تحويل سؤال المستخدم العامي إلى مصطلحات قانونية دقيقة للبحث.
+    مثال: "مديري طردني" -> "إنهاء عقد العمل الفصل التعسفي نظام العمل المادة 77"
+    """
+    try:
+        response = client.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[
+                {"role": "system", "content": "أنت خبير قانوني. قم بصياغة سؤال المستخدم ليحتوي على المصطلحات القانونية السعودية الصحيحة (مثل: نظام العمل، الأحوال الشخصية) والكلمات المفتاحية للبحث. أخرج نص البحث فقط."},
+                {"role": "user", "content": user_query}
+            ],
+            temperature=0.3,
+            max_tokens=100
+        )
+        optimized = response.choices[0].message.content.strip()
+        print(f"[Query Transform] Original: {user_query} -> Optimized: {optimized}")
+        return optimized
+    except:
+        return user_query
+
+# =====================
+# Retrieval Logic
 # =====================
 def reciprocal_rank_fusion(results: list[list[Document]], k=60):
     fused_scores = {}
     doc_map = {}
     for source_docs in results:
         for rank, doc in enumerate(source_docs):
-            doc_id = doc.metadata.get("article_key")
+            # استخدام النص كمعرف فريد في حال غياب المفتاح
+            doc_id = doc.metadata.get("article_key", doc.page_content[:20])
             if doc_id not in fused_scores:
                 fused_scores[doc_id] = 0
                 doc_map[doc_id] = doc
             fused_scores[doc_id] += 1 / (k + rank)
     
     reranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
-    # نعيد أفضل 20 نتيجة هنا لتمريرها لمرحلة إعادة الترتيب
-    return [doc_map[doc_id] for doc_id, score in reranked][:20]
+    return [doc_map[doc_id] for doc_id, score in reranked]
 
-def hybrid_retrieve_broad(query: str):
-    """يسترجع مجموعة واسعة من النتائج المرشحة"""
+def get_relevant_docs(query: str):
+    # 1. تحسين الاستعلام (الخطوة السحرية)
+    legal_query = optimize_query_for_legal_search(query)
+    
+    # 2. البحث المختلط
     faiss_retriever, bm25_retriever = _initialize_retrievers()
-    bm25_docs = bm25_retriever.invoke(query)
-    faiss_docs = faiss_retriever.invoke(query)
-    # دمج مبدئي للحصول على أفضل 20 مرشح
-    broad_docs = reciprocal_rank_fusion([bm25_docs, faiss_docs])
-    return broad_docs
+    if not faiss_retriever: return []
 
-# =====================
-# Cohere Reranking Step (The "Pro" Upgrade)
-# =====================
-def rerank_documents(query: str, docs: list[Document], top_n=5):
-    """ يستخدم Cohere لقراءة النتائج وإعادة ترتيبها حسب الصلة الدقيقة """
-    if not co or not docs:
-        return docs[:top_n] # الرجوع للترتيب العادي إذا لم يعمل Cohere
-
-    print(f"[RAG] Reranking {len(docs)} documents with Cohere...")
+    bm25_docs = bm25_retriever.invoke(legal_query) # نبحث بالمصطلحات القانونية
+    faiss_docs = faiss_retriever.invoke(query)     # نبحث بالمعنى الأصلي أيضاً
     
-    # تحضير النصوص لـ Cohere
-    docs_content = [d.page_content for d in docs]
+    # 3. دمج النتائج
+    broad_docs = reciprocal_rank_fusion([bm25_docs, faiss_docs])[:20]
+
+    # 4. إعادة الترتيب بذكاء (Rerank)
+    if co and broad_docs:
+        try:
+            rerank_resp = co.rerank(
+                model="rerank-multilingual-v3.0",
+                query=query, # نعيد الترتيب بناء على سؤال المستخدم الأصلي
+                documents=[d.page_content for d in broad_docs],
+                top_n=5
+            )
+            final_docs = [broad_docs[r.index] for r in rerank_resp.results]
+            return final_docs
+        except Exception as e:
+            print(f"[RAG] Cohere Error: {e}")
+            return broad_docs[:5]
     
-    try:
-        # استخدام النموذج متعدد اللغات الأحدث
-        response = co.rerank(
-            model="rerank-multilingual-v3.0",
-            query=query,
-            documents=docs_content,
-            top_n=top_n,
-            return_documents=False # نحتاج فقط المؤشرات والدرجات
-        )
-        
-        reranked_docs = []
-        for result in response.results:
-            # result.index هو ترتيب المستند في القائمة الأصلية
-            doc = docs[result.index]
-            # نضيف درجة الصلة للميتاداتا (اختياري، للمراقبة)
-            doc.metadata["relevance_score"] = result.relevance_score
-            reranked_docs.append(doc)
-            
-        print(f"[RAG] Reranking complete. Top score: {response.results[0].relevance_score}")
-        return reranked_docs
-
-    except Exception as e:
-        print(f"[RAG] Reranking Failed: {e}. Falling back to original order.")
-        return docs[:top_n]
+    return broad_docs[:5]
 
 # =====================
-# Prompt Builder
-# =====================
-def build_prompt(question, docs):
-    context = ""
-    for i, d in enumerate(docs, 1):
-        m = d.metadata
-        context += (
-            f"--- المستند {i} (الصلة: {m.get('relevance_score', 'N/A'):.2f}) ---\n"
-            f"النظام: {m['system']}\n"
-            f"رقم المادة: {m['article_number']}\n"
-            f"النص: {m['original_text']}\n\n"
-        )
-
-    return f"""
-أنت خبير قانوني سعودي متخصص بالذكاء الاصطناعي.
-مهمتك هي الإجابة على سؤال المستخدم بدقة، معتمداً **حصرياً** على النصوص القانونية المقدمة أدناه.
-
-السياق القانوني (مرتب حسب الصلة):
-{context}
-
-سؤال المستخدم: {question}
-
-الإرشادات:
-1. استخرج الإجابة مباشرة من النصوص المقدمة.
-2. يجب أن تذكر صراحة "اسم النظام" و "رقم المادة" التي استندت إليها في إجابتك.
-3. إذا كانت النصوص المقدمة لا تحتوي على الإجابة القاطعة، قل: "عذراً، النصوص القانونية المتاحة لا تحتوي على إجابة دقيقة لهذا السؤال." ولا تحاول تأليف إجابة من خارج السياق.
-4. أجب باللغة العربية بأسلوب مهني وواضح.
-""".strip()
-
-# =====================
-# Public API Function
+# Final Answer Generation
 # =====================
 def answer_question(question: str):
-    try:
-        # 1. استرجاع واسع (أفضل 20)
-        broad_docs = hybrid_retrieve_broad(question)
+    docs = get_relevant_docs(question)
+    
+    if not docs:
+        return {"answer": "عذراً، لم أجد نصوصاً قانونية ذات صلة في قاعدة البيانات.", "articles": []}
 
-        if not broad_docs:
-             return {"answer": "لم أتمكن من العثور على مراجع مناسبة في قاعدة البيانات.", "articles": []}
+    context_str = "\n\n".join([
+        f"--- المستند {i+1} ---\n{d.page_content}" 
+        for i, d in enumerate(docs)
+    ])
 
-        # 2. إعادة الترتيب الذكي (أفضل 5) - الخطوة الجديدة
-        final_docs = rerank_documents(question, broad_docs, top_n=5)
+    prompt = f"""
+أنت مستشار قانوني سعودي.
+أجب على السؤال التالي بناءً **فقط** على النصوص القانونية المقدمة أدناه.
 
-        # 3. بناء السياق والإجابة
-        prompt = build_prompt(question, final_docs)
+السياق القانوني:
+{context_str}
 
-        print("[RAG] Sending to GPT-4...")
-        response = client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0, # الحفاظ على الدقة
-            max_tokens=1500,
-        )
+السؤال: {question}
 
-        return {
-            "answer": response.choices[0].message.content.strip(),
-            "articles": [d.metadata for d in final_docs],
-        }
-    except Exception as e:
-        print(f"Error generating answer: {e}")
-        # طباعة الخطأ كاملاً في السيرفر للمساعدة في التتبع
-        import traceback
-        traceback.print_exc()
-        return {"answer": "حدث خطأ فني أثناء معالجة الطلب.", "articles": []}
+التعليمات:
+1. اذكر اسم النظام ورقم المادة بوضوح في إجابتك.
+2. كن مباشراً ودقيقاً.
+3. إذا لم تجد الإجابة في السياق، قل "لا توجد معلومات كافية في المصادر المتوفرة".
+"""
+
+    response = client.chat.completions.create(
+        model=GPT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0
+    )
+
+    return {
+        "answer": response.choices[0].message.content.strip(),
+        "articles": [d.metadata for d in docs]
+    }
