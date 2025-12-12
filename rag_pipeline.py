@@ -1,5 +1,5 @@
 # rag_pipeline.py
-import os, json
+import os, json, gc
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -8,95 +8,99 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain_openai import OpenAIEmbeddings
 
-# Note: We removed the classifier import to stop the "Hard Filter" issue.
-# If you want to use the classifier, use it to ADD context to the prompt, not to filter documents.
-# from classifier import predict_system 
-
 load_dotenv()
 
 DATA_PATH = "full_systems_dataset_fixed.json"
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo") # Ensure you use a valid model name
+GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
 
 # =====================
-# Load Legal Documents
+# Global Variables (Lazy Loading)
 # =====================
-print("Loading dataset...")
-with open(DATA_PATH, "r", encoding="utf-8") as f:
-    data = json.load(f)
+_faiss_retriever = None
+_bm25_retriever = None
+client = OpenAI()
 
-documents = []
-for item in data:
-    # Adding more context to the page_content improves semantic search
-    page_content = f"System: {item['system']}\nArticle: {item['article_number']}\nContent: {item['text']}"
+def _initialize_retrievers():
+    """
+    يقوم بتحميل البيانات وبناء الفهارس فقط عند الحاجة لتقليل استهلاك الذاكرة عند الإقلاع.
+    """
+    global _faiss_retriever, _bm25_retriever
+
+    if _faiss_retriever is not None:
+        return _faiss_retriever, _bm25_retriever
+
+    print("[RAG] Loading dataset into memory...")
     
-    metadata = {
-        "system": item["system"],
-        "system_code": item["system_code"],
-        "article_key": item["article_key"],
-        "article_number": item["article_number"],
-        "original_text": item["text"],
-    }
-    documents.append(Document(page_content=page_content, metadata=metadata))
+    # 1. Load Data
+    with open(DATA_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-print(f"Loaded {len(documents)} documents.")
+    documents = []
+    for item in data:
+        page_content = f"System: {item['system']}\nArticle: {item['article_number']}\nContent: {item['text']}"
+        metadata = {
+            "system": item["system"],
+            "article_number": item["article_number"],
+            "original_text": item["text"],
+            "article_key": item["article_key"] # Important for RRF deduplication
+        }
+        documents.append(Document(page_content=page_content, metadata=metadata))
+    
+    print(f"[RAG] Created {len(documents)} documents.")
+
+    # 2. Free raw JSON memory immediately
+    del data
+    gc.collect()
+
+    # 3. Build Retrievers
+    print("[RAG] Building FAISS Index...")
+    embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
+    faiss_store = FAISS.from_documents(documents, embeddings)
+    _faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 20})
+
+    print("[RAG] Building BM25 Index...")
+    _bm25_retriever = BM25Retriever.from_documents(documents)
+    _bm25_retriever.k = 20
+
+    # 4. Free documents memory (indexes have their own copy/reference)
+    # ملاحظة: BM25 يحتفظ بنسخة، و FAISS يحتفظ بنسخة. 
+    # حذف القائمة الأصلية يوفر بعض الذاكرة.
+    del documents
+    gc.collect()
+
+    print("[RAG] Initialization Complete.")
+    return _faiss_retriever, _bm25_retriever
 
 # =====================
-# Retrievers
-# =====================
-embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-faiss_store = FAISS.from_documents(documents, embeddings)
-# Increase k here to cast a wider net initially
-faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 20}) 
-
-bm25_retriever = BM25Retriever.from_documents(documents)
-bm25_retriever.k = 20
-
-# =====================
-# RRF (Reciprocal Rank Fusion) Logic
+# RRF Logic
 # =====================
 def reciprocal_rank_fusion(results: list[list[Document]], k=60):
-    """
-    Combines results from multiple retrievers using RRF.
-    Higher score = better match.
-    """
     fused_scores = {}
     doc_map = {}
-
     for source_docs in results:
         for rank, doc in enumerate(source_docs):
-            # Use article_key as a unique identifier to merge duplicates
-            doc_id = doc.metadata.get("article_key") 
+            doc_id = doc.metadata.get("article_key")
             if doc_id not in fused_scores:
                 fused_scores[doc_id] = 0
                 doc_map[doc_id] = doc
-            
-            # The standard RRF formula: 1 / (k + rank)
             fused_scores[doc_id] += 1 / (k + rank)
-
-    # Sort documents by final score (descending)
-    reranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
     
-    # Return the Document objects
+    reranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
     return [doc_map[doc_id] for doc_id, score in reranked]
 
 def hybrid_retrieve(query: str, k=5):
-    # 1. Retrieve broad results from both methods
+    # Load retrievers on demand
+    faiss_retriever, bm25_retriever = _initialize_retrievers()
+
     bm25_docs = bm25_retriever.invoke(query)
     faiss_docs = faiss_retriever.invoke(query)
-
-    # 2. Fuse them intelligently using RRF
-    # This ensures that if a doc appears in BOTH lists, it jumps to the top.
     fused_docs = reciprocal_rank_fusion([bm25_docs, faiss_docs])
-
-    # 3. Return top k
     return fused_docs[:k]
 
 # =====================
 # Prompt Builder
 # =====================
-client = OpenAI()
-
 def build_prompt(question, docs):
     context = ""
     for i, d in enumerate(docs, 1):
@@ -127,27 +131,25 @@ Guidelines:
 # Public API Function
 # =====================
 def answer_question(question: str):
-    # We removed predict_system to prevent the "Hard Filter" error.
-    # If the system is not predicting correctly, it hurts more than it helps.
-    
-    print(f"[RAG] Processing: {question}")
-    
-    # Retrieve
-    docs = hybrid_retrieve(question, k=5)
+    try:
+        docs = hybrid_retrieve(question, k=5)
 
-    if not docs:
-        return {"answer": "لم أتمكن من العثور على مراجع مناسبة.", "articles": []}
+        if not docs:
+            return {"answer": "لم أتمكن من العثور على مراجع مناسبة.", "articles": []}
 
-    prompt = build_prompt(question, docs)
+        prompt = build_prompt(question, docs)
 
-    response = client.chat.completions.create(
-        model=GPT_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0, # Lower temperature for strictly factual answers
-        max_tokens=2000,
-    )
+        response = client.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=2000,
+        )
 
-    return {
-        "answer": response.choices[0].message.content.strip(),
-        "articles": [d.metadata for d in docs],
-    }
+        return {
+            "answer": response.choices[0].message.content.strip(),
+            "articles": [d.metadata for d in docs],
+        }
+    except Exception as e:
+        print(f"Error generating answer: {e}")
+        return {"answer": "حدث خطأ أثناء معالجة الطلب.", "articles": []}
