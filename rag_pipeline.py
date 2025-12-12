@@ -8,23 +8,28 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain_openai import OpenAIEmbeddings
 
-from classifier import predict_system
+# Note: We removed the classifier import to stop the "Hard Filter" issue.
+# If you want to use the classifier, use it to ADD context to the prompt, not to filter documents.
+# from classifier import predict_system 
 
 load_dotenv()
 
 DATA_PATH = "full_systems_dataset_fixed.json"
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+GPT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo") # Ensure you use a valid model name
 
 # =====================
 # Load Legal Documents
 # =====================
+print("Loading dataset...")
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     data = json.load(f)
 
 documents = []
 for item in data:
-    page_content = f"{item['system']} - {item['article_number']}:\n{item['text']}"
+    # Adding more context to the page_content improves semantic search
+    page_content = f"System: {item['system']}\nArticle: {item['article_number']}\nContent: {item['text']}"
+    
     metadata = {
         "system": item["system"],
         "system_code": item["system_code"],
@@ -34,44 +39,58 @@ for item in data:
     }
     documents.append(Document(page_content=page_content, metadata=metadata))
 
+print(f"Loaded {len(documents)} documents.")
+
 # =====================
 # Retrievers
 # =====================
 embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
 faiss_store = FAISS.from_documents(documents, embeddings)
-faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 8})
+# Increase k here to cast a wider net initially
+faiss_retriever = faiss_store.as_retriever(search_kwargs={"k": 20}) 
 
 bm25_retriever = BM25Retriever.from_documents(documents)
-bm25_retriever.k = 8
+bm25_retriever.k = 20
 
-def hybrid_retrieve(query: str, k=5, system_hint=None):
+# =====================
+# RRF (Reciprocal Rank Fusion) Logic
+# =====================
+def reciprocal_rank_fusion(results: list[list[Document]], k=60):
+    """
+    Combines results from multiple retrievers using RRF.
+    Higher score = better match.
+    """
+    fused_scores = {}
+    doc_map = {}
+
+    for source_docs in results:
+        for rank, doc in enumerate(source_docs):
+            # Use article_key as a unique identifier to merge duplicates
+            doc_id = doc.metadata.get("article_key") 
+            if doc_id not in fused_scores:
+                fused_scores[doc_id] = 0
+                doc_map[doc_id] = doc
+            
+            # The standard RRF formula: 1 / (k + rank)
+            fused_scores[doc_id] += 1 / (k + rank)
+
+    # Sort documents by final score (descending)
+    reranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Return the Document objects
+    return [doc_map[doc_id] for doc_id, score in reranked]
+
+def hybrid_retrieve(query: str, k=5):
+    # 1. Retrieve broad results from both methods
     bm25_docs = bm25_retriever.invoke(query)
     faiss_docs = faiss_retriever.invoke(query)
 
-    merged, seen = [], set()
+    # 2. Fuse them intelligently using RRF
+    # This ensures that if a doc appears in BOTH lists, it jumps to the top.
+    fused_docs = reciprocal_rank_fusion([bm25_docs, faiss_docs])
 
-    def add(docs):
-        for d in docs:
-            if system_hint and d.metadata.get("system_code") != system_hint:
-                continue
-            key = d.metadata.get("article_key")
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(d)
-            if len(merged) >= k:
-                break
-
-    add(bm25_docs)
-    if len(merged) < k:
-        add(faiss_docs)
-
-    # fallback آمن
-    if not merged:
-        add(bm25_docs)
-        add(faiss_docs)
-
-    return merged[:k]
+    # 3. Return top k
+    return fused_docs[:k]
 
 # =====================
 # Prompt Builder
@@ -83,45 +102,48 @@ def build_prompt(question, docs):
     for i, d in enumerate(docs, 1):
         m = d.metadata
         context += (
-            f"[{i}] {m['system']} ({m['system_code']}) "
-            f"{m['article_number']} – {m['article_key']}\n"
-            f"{m['original_text']}\n\n"
+            f"--- Document {i} ---\n"
+            f"System: {m['system']}\n"
+            f"Article: {m['article_number']}\n"
+            f"Text: {m['original_text']}\n\n"
         )
 
     return f"""
-أنت مساعد قانوني متخصص في الأنظمة السعودية.
-اعتمد فقط على النصوص أدناه، ولا تجتهد خارجها.
+You are a Saudi Legal Expert AI. 
+Answer the user's question accurately using ONLY the provided legal texts below.
 
-النصوص النظامية:
+Context:
 {context}
 
-السؤال:
-{question}
+User Question: {question}
 
-التعليمات:
-- أجب بالعربية الفصحى.
-- اربط كل حكم بالمراجع [1] [2].
-- إذا لم تكفِ النصوص، صرّح بذلك.
+Guidelines:
+1. If the answer exists in the context, quote the Article Number and System Name explicitly.
+2. If the context does not contain the answer, say "The provided documents do not contain the answer." Do not make up laws.
+3. Answer in Arabic.
 """.strip()
 
 # =====================
 # Public API Function
 # =====================
 def answer_question(question: str):
-    system_hint = predict_system(question)
-    print(f"[Router] Suggested system: {system_hint}")
-
-    docs = hybrid_retrieve(question, k=5, system_hint=system_hint)
+    # We removed predict_system to prevent the "Hard Filter" error.
+    # If the system is not predicting correctly, it hurts more than it helps.
+    
+    print(f"[RAG] Processing: {question}")
+    
+    # Retrieve
+    docs = hybrid_retrieve(question, k=5)
 
     if not docs:
-        return {"answer": "لا توجد نصوص كافية للإجابة.", "articles": []}
+        return {"answer": "لم أتمكن من العثور على مراجع مناسبة.", "articles": []}
 
     prompt = build_prompt(question, docs)
 
     response = client.chat.completions.create(
         model=GPT_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
+        temperature=0.0, # Lower temperature for strictly factual answers
         max_tokens=2000,
     )
 
